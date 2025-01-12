@@ -3,17 +3,19 @@ from pathlib import Path
 from typing import List, Dict, Any, Set
 import logging
 from datetime import datetime
-
+import pandas as pd
 import chromadb
 from bs4 import BeautifulSoup
 from langchain_huggingface import HuggingFaceEmbeddings
 
 class Config:
     def __init__(self, persist_dir: str = "chroma_db"):
-        self.collection_name = "html_documents"
+        self.collection_name = "documents"
         self.model_name = "BAAI/bge-small-en-v1.5"
         self.persist_dir = persist_dir
+        self.data_dir = "database"
         self.log_dir = "logs"
+        self.supported_extensions = {'.html', '.csv'}
 
 class FileTracker:
     def __init__(self, log_dir: str):
@@ -34,12 +36,16 @@ class FileTracker:
 
 class DocumentIndexer:
     def __init__(self, config: Config):
+        self.config = config
         Path(config.persist_dir).mkdir(parents=True, exist_ok=True)
         self.tracker = FileTracker(config.log_dir)
-        
         self.client = chromadb.PersistentClient(path=config.persist_dir)
         self.embeddings = HuggingFaceEmbeddings(model_name=config.model_name)
         self.collection = self._get_collection(config.collection_name)
+
+    def _extract_csv_text(self, file_path: Path) -> str:
+        df = pd.read_csv(file_path)
+        return ' '.join(df.astype(str).values.flatten())
 
     def _get_collection(self, name: str):
         try:
@@ -54,10 +60,20 @@ class DocumentIndexer:
             )
 
     def _extract_text(self, file_path: Path) -> str:
-        with open(file_path, "r", encoding="utf-8") as file:
-            soup = BeautifulSoup(file, "html.parser")
-        return soup.get_text(separator=" ", strip=True)
-
+        if file_path.suffix == '.html':
+            with open(file_path, "r", encoding="utf-8") as file:
+                soup = BeautifulSoup(file, "html.parser")
+            return soup.get_text(separator=" ", strip=True)
+        elif file_path.suffix == '.csv':
+            return self._extract_csv_text(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+    def _find_files(self, directory: Path) -> Set[Path]:
+        files = set()
+        for ext in self.config.supported_extensions:
+            files.update(directory.rglob(f"*{ext}"))
+        return files
+    
     def _find_html_files(self, directory: Path) -> Set[Path]:
         html_files = set()
         
@@ -77,23 +93,28 @@ class DocumentIndexer:
         start_time = datetime.now()
         directory = Path(directory)
         logging.info(f"Starting indexing of directory: {directory}")
+
         
         indexed_docs = self.get_indexed_docs()
-        html_files = self._find_html_files(directory)
+        files = self._find_files(directory)
+        logging.info(f"Found {len(files)} files to process")
         
-        logging.info(f"Found {len(html_files)} HTML files")
-        
-        for file_path in sorted(html_files):
+        for file_path in sorted(files):
             try:
                 doc_id = f"doc_{file_path.name}"
                 if doc_id in indexed_docs:
-                    logging.debug(f"Skipping already indexed file: {file_path}")
                     continue
 
                 text = self._extract_text(file_path)
+                metadata = {
+                    "source": str(file_path),
+                    "file_type": file_path.suffix[1:],
+                    "filename": file_path.name
+                }
+                
                 self.collection.add(
                     documents=[text],
-                    metadatas=[{"source": str(file_path)}],
+                    metadatas=[metadata],
                     ids=[doc_id]
                 )
                 logging.info(f"Successfully indexed: {file_path}")
@@ -108,7 +129,6 @@ class DocumentIndexer:
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
         logging.info(f"Indexing completed in {duration:.2f} seconds")
-        logging.info(f"Total files processed: {len(html_files)}")
 
     def get_indexed_docs(self) -> Set[str]:
         try:

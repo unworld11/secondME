@@ -1,11 +1,6 @@
-from embed import Config, DocumentIndexer, Path
+from query_rag import query_documents
 
-def main():
-    config = Config()
-    indexer = DocumentIndexer(config)
-    results = indexer.search("where am i")
-    print("Search Results:")
-    print(results)
+query = "Who am i"
+engine = query_documents(query)
 
-if __name__ == "__main__":
-    main()
+print(engine)
